@@ -95,6 +95,16 @@ public class ShortenedNamesCheck implements HealthCheck {
 			}
 
 			var longName = Files.readString(nameFile, UTF_8);
+
+			var syntaxResult = checkSyntax(longName);
+			if (syntaxResult == SyntaxResult.INVALID) {
+				resultCollector.accept(new NotDecodableLongName(nameFile, longName));
+				return;
+			} else if (syntaxResult == SyntaxResult.TRAILING_BYTES) {
+				resultCollector.accept(new TrailingBytesInNameFile(nameFile, longName));
+				return;
+			}
+
 			var expectedShortName = deflate(longName);
 			if (!dir.getFileName().toString().equals(expectedShortName)) {
 				resultCollector.accept(new LongShortNamesMismatch(dir, expectedShortName));
@@ -103,11 +113,45 @@ public class ShortenedNamesCheck implements HealthCheck {
 			}
 		}
 
+
+		/**
+		 * Determines if the string stored inside the name file is a base64url encoded ending with {@value Constants#CRYPTOMATOR_FILE_SUFFIX}.
+		 *
+		 * <em>visible for testing</em>
+		 *
+		 * @return {@link SyntaxResult} indicating if it is valid, invalid or affected by https://github.com/cryptomator/cryptofs/issues/121
+		 */
+		SyntaxResult checkSyntax(String toAnalyse) {
+			int posObligatoryC9rString = toAnalyse.indexOf(Constants.CRYPTOMATOR_FILE_SUFFIX);
+			if (posObligatoryC9rString == -1) {
+				return SyntaxResult.INVALID;
+			}
+
+			var encryptedFileName = toAnalyse.substring(0, posObligatoryC9rString);
+			if (!BASE64URL.canDecode(encryptedFileName)) {
+				return SyntaxResult.INVALID;
+			}
+
+			if (toAnalyse.length() > posObligatoryC9rString + Constants.CRYPTOMATOR_FILE_SUFFIX.length()) {
+				return SyntaxResult.TRAILING_BYTES;
+			}
+
+			return SyntaxResult.VALID;
+		}
+
+		enum SyntaxResult {
+			VALID,
+			INVALID,
+			TRAILING_BYTES; //to indicate issue https://github.com/cryptomator/cryptofs/issues/121
+		}
+
 		//visible for testing
 		String deflate(String longFileName) {
 			byte[] longFileNameBytes = longFileName.getBytes(UTF_8);
-			byte[] hash = MessageDigestSupplier.SHA1.get().digest(longFileNameBytes);
-			return BASE64URL.encode(hash) + DEFLATED_FILE_SUFFIX;
+			try (var sha1 = MessageDigestSupplier.SHA1.instance()) {
+				byte[] hash = sha1.get().digest(longFileNameBytes);
+				return BASE64URL.encode(hash) + DEFLATED_FILE_SUFFIX;
+			}
 		}
 
 	}

@@ -2,12 +2,13 @@ package org.cryptomator.cryptofs.ch;
 
 import org.cryptomator.cryptofs.CryptoFileSystemStats;
 import org.cryptomator.cryptofs.EffectiveOpenOptions;
+import org.cryptomator.cryptofs.fh.BufferPool;
+import org.cryptomator.cryptofs.fh.Chunk;
 import org.cryptomator.cryptofs.fh.ChunkCache;
-import org.cryptomator.cryptofs.fh.ChunkData;
 import org.cryptomator.cryptofs.fh.ExceptionsDuringWrite;
+import org.cryptomator.cryptofs.fh.FileHeaderHolder;
 import org.cryptomator.cryptolib.api.Cryptor;
 import org.cryptomator.cryptolib.api.FileContentCryptor;
-import org.cryptomator.cryptolib.api.FileHeader;
 import org.cryptomator.cryptolib.api.FileHeaderCryptor;
 import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.Assertions;
@@ -31,25 +32,35 @@ import java.nio.channels.NonReadableChannelException;
 import java.nio.channels.NonWritableChannelException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.FileSystem;
+import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.spi.FileSystemProvider;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
-import java.util.function.Supplier;
+import java.util.function.Consumer;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class CleartextFileChannelTest {
 
 	private ChunkCache chunkCache = mock(ChunkCache.class);
+	private BufferPool bufferPool = mock(BufferPool.class);
 	private ReadWriteLock readWriteLock = mock(ReadWriteLock.class);
 	private Lock readLock = mock(Lock.class);
 	private Lock writeLock = mock(Lock.class);
@@ -57,15 +68,16 @@ public class CleartextFileChannelTest {
 	private FileHeaderCryptor fileHeaderCryptor = mock(FileHeaderCryptor.class);
 	private FileContentCryptor fileContentCryptor = mock(FileContentCryptor.class);
 	private FileChannel ciphertextFileChannel = mock(FileChannel.class);
-	private FileHeader header = mock(FileHeader.class);
-	private boolean mustWriteHeader = true;
+	private FileHeaderHolder headerHolder = mock(FileHeaderHolder.class);
+	private AtomicBoolean headerIsPersisted = mock(AtomicBoolean.class);
 	private EffectiveOpenOptions options = mock(EffectiveOpenOptions.class);
+	private Path filePath = Mockito.mock(Path.class, "/foo/bar");
+	private AtomicReference<Path> currentFilePath = new AtomicReference<>(filePath);
 	private AtomicLong fileSize = new AtomicLong(100);
-	private AtomicReference<Instant> lastModified = new AtomicReference(Instant.ofEpochMilli(0));
-	private Supplier<BasicFileAttributeView> attributeViewSupplier = mock(Supplier.class);
+	private AtomicReference<Instant> lastModified = new AtomicReference<>(Instant.ofEpochMilli(0));
 	private BasicFileAttributeView attributeView = mock(BasicFileAttributeView.class);
 	private ExceptionsDuringWrite exceptionsDuringWrite = mock(ExceptionsDuringWrite.class);
-	private ChannelCloseListener closeListener = mock(ChannelCloseListener.class);
+	private Consumer<FileChannel> closeListener = mock(Consumer.class);
 	private CryptoFileSystemStats stats = mock(CryptoFileSystemStats.class);
 
 	private CleartextFileChannel inTest;
@@ -74,15 +86,23 @@ public class CleartextFileChannelTest {
 	public void setUp() throws IOException {
 		when(cryptor.fileHeaderCryptor()).thenReturn(fileHeaderCryptor);
 		when(cryptor.fileContentCryptor()).thenReturn(fileContentCryptor);
-		when(chunkCache.get(Mockito.anyLong())).then(invocation -> ChunkData.wrap(ByteBuffer.allocate(100)));
+		when(chunkCache.getChunk(Mockito.anyLong())).then(invocation -> new Chunk(ByteBuffer.allocate(100), false, () -> {}));
+		when(chunkCache.putChunk(Mockito.anyLong(), Mockito.any())).thenAnswer(invocation -> new Chunk(invocation.getArgument(1), true, () -> {}));
+		when(bufferPool.getCleartextBuffer()).thenAnswer(invocation -> ByteBuffer.allocate(100));
 		when(fileHeaderCryptor.headerSize()).thenReturn(50);
+		when(headerHolder.headerIsPersisted()).thenReturn(headerIsPersisted);
+		when(headerIsPersisted.getAndSet(anyBoolean())).thenReturn(true);
 		when(fileContentCryptor.cleartextChunkSize()).thenReturn(100);
 		when(fileContentCryptor.ciphertextChunkSize()).thenReturn(110);
-		when(attributeViewSupplier.get()).thenReturn(attributeView);
+		var fs = Mockito.mock(FileSystem.class);
+		var fsProvider = Mockito.mock(FileSystemProvider.class);
+		when(filePath.getFileSystem()).thenReturn(fs);
+		when(fs.provider()).thenReturn(fsProvider);
+		when(fsProvider.getFileAttributeView(filePath, BasicFileAttributeView.class)).thenReturn(attributeView);
 		when(readWriteLock.readLock()).thenReturn(readLock);
 		when(readWriteLock.writeLock()).thenReturn(writeLock);
 
-		inTest = new CleartextFileChannel(ciphertextFileChannel, header, mustWriteHeader, readWriteLock, cryptor, chunkCache, options, fileSize, lastModified, attributeViewSupplier, exceptionsDuringWrite, closeListener, stats);
+		inTest = new CleartextFileChannel(ciphertextFileChannel, headerHolder, readWriteLock, cryptor, chunkCache, bufferPool, options, fileSize, lastModified, currentFilePath, exceptionsDuringWrite, closeListener, stats);
 	}
 
 	@Test
@@ -135,7 +155,6 @@ public class CleartextFileChannelTest {
 
 			inTest.truncate(newSize);
 
-
 			MatcherAssert.assertThat(inTest.position(), is(currentPosition));
 		}
 
@@ -174,7 +193,7 @@ public class CleartextFileChannelTest {
 
 			inTest.force(false);
 
-			verify(chunkCache).invalidateAll();
+			verify(chunkCache).flush();
 		}
 
 		@Test
@@ -187,7 +206,7 @@ public class CleartextFileChannelTest {
 			});
 			Assertions.assertEquals("exception during write", e.getMessage());
 
-			verify(chunkCache).invalidateAll();
+			verify(chunkCache).flush();
 		}
 
 		@Test
@@ -217,10 +236,38 @@ public class CleartextFileChannelTest {
 	public class Close {
 
 		@Test
-		public void testCloseTriggersCloseListener() throws IOException {
-			inTest.implCloseChannel();
+		@DisplayName("IOException during flush cleans up, persists lastModified and rethrows")
+		public void testCloseIoExceptionFlush() throws IOException {
+			var inSpy = Mockito.spy(inTest);
+			Mockito.doThrow(IOException.class).when(inSpy).flush();
 
-			verify(closeListener).closed(inTest);
+			Assertions.assertThrows(IOException.class, () -> inSpy.implCloseChannel());
+
+			verify(closeListener).accept(ciphertextFileChannel);
+			verify(ciphertextFileChannel).close();
+			verify(inSpy).persistLastModified();
+		}
+
+		@Test
+		@DisplayName("On close, first flush channel, then unregister")
+		public void testCloseCipherChannelFlushBeforeUnregister() throws IOException {
+			var inSpy = spy(inTest);
+			inSpy.implCloseChannel();
+
+			var ordering = inOrder(inSpy, closeListener);
+			ordering.verify(inSpy).flush();
+			verify(closeListener).accept(ciphertextFileChannel);
+		}
+
+		@Test
+		@DisplayName("On close, first close channel, then persist lastModified")
+		public void testCloseCipherChannelCloseBeforePersist() throws IOException {
+			var inSpy = spy(inTest);
+			inSpy.implCloseChannel();
+
+			var ordering = inOrder(inSpy, ciphertextFileChannel);
+			ordering.verify(ciphertextFileChannel).close();
+			ordering.verify(inSpy).persistLastModified();
 		}
 
 		@Test
@@ -232,6 +279,20 @@ public class CleartextFileChannelTest {
 			inTest.implCloseChannel();
 
 			verify(attributeView).setTimes(Mockito.eq(fileTime), Mockito.any(), Mockito.isNull());
+		}
+
+		@Test
+		@DisplayName("IOException on persisting lastModified during close is ignored")
+		public void testCloseExceptionOnLastModifiedPersistenceIgnored() throws IOException {
+			when(options.writable()).thenReturn(true);
+			lastModified.set(Instant.ofEpochMilli(123456789000l));
+
+			var inSpy = Mockito.spy(inTest);
+			Mockito.doThrow(IOException.class).when(inSpy).persistLastModified();
+
+			Assertions.assertDoesNotThrow(inSpy::implCloseChannel);
+			verify(closeListener).accept(ciphertextFileChannel);
+			verify(ciphertextFileChannel).close();
 		}
 
 		@Test
@@ -323,10 +384,11 @@ public class CleartextFileChannelTest {
 
 		@Test
 		public void testReadFailsIfNotReadable() throws IOException {
+			var buf = ByteBuffer.allocate(10);
 			when(options.readable()).thenReturn(false);
 
 			Assertions.assertThrows(NonReadableChannelException.class, () -> {
-				inTest.read(ByteBuffer.allocate(10));
+				inTest.read(buf);
 			});
 		}
 
@@ -335,7 +397,7 @@ public class CleartextFileChannelTest {
 			fileSize.set(5_000_000_100l); // initial cleartext size will be 5_000_000_100l
 			when(options.readable()).thenReturn(true);
 
-			inTest = new CleartextFileChannel(ciphertextFileChannel, header, mustWriteHeader, readWriteLock, cryptor, chunkCache, options, fileSize, lastModified, attributeViewSupplier, exceptionsDuringWrite, closeListener, stats);
+			inTest = new CleartextFileChannel(ciphertextFileChannel, headerHolder, readWriteLock, cryptor, chunkCache, bufferPool, options, fileSize, lastModified, currentFilePath, exceptionsDuringWrite, closeListener, stats);
 			ByteBuffer buf = ByteBuffer.allocate(10);
 
 			// A read from frist chunk:
@@ -351,10 +413,10 @@ public class CleartextFileChannelTest {
 			inTest.read(buf, 5_000_000_000l);
 
 			InOrder inOrder = Mockito.inOrder(chunkCache, chunkCache, chunkCache, chunkCache);
-			inOrder.verify(chunkCache).get(0l); // A
-			inOrder.verify(chunkCache).get(1l); // B
-			inOrder.verify(chunkCache).get(2l); // B
-			inOrder.verify(chunkCache).get(50_000_000l); // C
+			inOrder.verify(chunkCache).getChunk(0l); // A
+			inOrder.verify(chunkCache).getChunk(1l); // B
+			inOrder.verify(chunkCache).getChunk(2l); // B
+			inOrder.verify(chunkCache).getChunk(50_000_000l); // C
 			inOrder.verifyNoMoreInteractions();
 		}
 
@@ -404,19 +466,20 @@ public class CleartextFileChannelTest {
 			inTest.write(buf3, 5000);
 
 			InOrder inOrder = Mockito.inOrder(chunkCache, chunkCache, chunkCache);
-			inOrder.verify(chunkCache).get(0l); // A
-			inOrder.verify(chunkCache).set(Mockito.eq(1l), Mockito.any()); // B
-			inOrder.verify(chunkCache).set(Mockito.eq(50l), Mockito.any()); // C
+			inOrder.verify(chunkCache).getChunk(0l); // A
+			inOrder.verify(chunkCache).putChunk(Mockito.eq(1l), Mockito.any()); // B
+			inOrder.verify(chunkCache).putChunk(Mockito.eq(50l), Mockito.any()); // C
 			inOrder.verifyNoMoreInteractions();
 		}
 
 		@Test
 		@DisplayName("write to non-writable channel")
 		public void testWriteFailsIfNotWritable() {
+			var buf = ByteBuffer.allocate(10);
 			when(options.writable()).thenReturn(false);
 
 			Assertions.assertThrows(NonWritableChannelException.class, () -> {
-				inTest.write(ByteBuffer.allocate(10));
+				inTest.write(buf);
 			});
 		}
 
@@ -433,9 +496,9 @@ public class CleartextFileChannelTest {
 			Assertions.assertEquals(110, written);
 			Assertions.assertEquals(205, inTest.size());
 
-			verify(chunkCache).get(0l);
-			verify(chunkCache).set(Mockito.eq(1l), Mockito.any());
-			verify(chunkCache).get(2l);
+			verify(chunkCache).getChunk(0l);
+			verify(chunkCache).putChunk(Mockito.eq(1l), Mockito.any());
+			verify(chunkCache).getChunk(2l);
 		}
 
 		@Test
@@ -478,6 +541,8 @@ public class CleartextFileChannelTest {
 		public void testWriteHeaderIfNeeded() throws IOException {
 			when(options.writable()).thenReturn(true);
 
+			when(headerIsPersisted.get()).thenReturn(false).thenReturn(true).thenReturn(true);
+
 			inTest.force(true);
 			inTest.force(true);
 			inTest.force(true);
@@ -486,10 +551,25 @@ public class CleartextFileChannelTest {
 		}
 
 		@Test
+		@DisplayName("If writing header fails, it is indicated as not persistent")
+		public void testWriteHeaderFailsResetsPersistenceState() throws IOException {
+			when(options.writable()).thenReturn(true);
+			when(headerIsPersisted.get()).thenReturn(false);
+			doNothing().when(headerIsPersisted).set(anyBoolean());
+			when(ciphertextFileChannel.write(any(), anyLong())).thenThrow(new IOException("writing failed"));
+
+			Assertions.assertThrows(IOException.class, () -> inTest.force(true));
+
+			Mockito.verify(ciphertextFileChannel, Mockito.times(1)).write(Mockito.any(), Mockito.eq(0l));
+			Mockito.verify(headerIsPersisted, Mockito.never()).set(anyBoolean());
+		}
+
+		@Test
 		@DisplayName("don't write header if it is already written")
 		public void testDontRewriteHeader() throws IOException {
 			when(options.writable()).thenReturn(true);
-			inTest = new CleartextFileChannel(ciphertextFileChannel, header, false, readWriteLock, cryptor, chunkCache, options, fileSize, lastModified, attributeViewSupplier, exceptionsDuringWrite, closeListener, stats);
+			when(headerIsPersisted.get()).thenReturn(true);
+			inTest = new CleartextFileChannel(ciphertextFileChannel, headerHolder, readWriteLock, cryptor, chunkCache, bufferPool, options, fileSize, lastModified, currentFilePath, exceptionsDuringWrite, closeListener, stats);
 
 			inTest.force(true);
 
@@ -526,40 +606,44 @@ public class CleartextFileChannelTest {
 		@Test
 		@DisplayName("read(buf)")
 		public void testRead() {
+			var buf = ByteBuffer.allocate(10);
 			when(options.readable()).thenReturn(true);
 
 			Assertions.assertThrows(ClosedChannelException.class, () -> {
-				inTest.read(ByteBuffer.allocate(10));
+				inTest.read(buf);
 			});
 		}
 
 		@Test
 		@DisplayName("write(buf)")
 		public void testWrite() {
+			var buf = ByteBuffer.allocate(10);
 			when(options.writable()).thenReturn(true);
 
 			Assertions.assertThrows(ClosedChannelException.class, () -> {
-				inTest.write(ByteBuffer.allocate(10));
+				inTest.write(buf);
 			});
 		}
 
 		@Test
 		@DisplayName("read(buf, pos)")
 		public void testReadWithPosition() {
+			var buf = ByteBuffer.allocate(10);
 			when(options.readable()).thenReturn(true);
 
 			Assertions.assertThrows(ClosedChannelException.class, () -> {
-				inTest.read(ByteBuffer.allocate(10), 3727L);
+				inTest.read(buf, 3727L);
 			});
 		}
 
 		@Test
 		@DisplayName("write(buf, pos)")
 		public void testWriteWithPosition() {
+			var buf = ByteBuffer.allocate(10);
 			when(options.writable()).thenReturn(true);
 
 			Assertions.assertThrows(ClosedChannelException.class, () -> {
-				inTest.write(ByteBuffer.allocate(10), 3727L);
+				inTest.write(buf, 3727L);
 			});
 		}
 

@@ -1,11 +1,16 @@
 package org.cryptomator.cryptofs.dir;
 
+import org.cryptomator.cryptofs.CiphertextDirectory;
 import org.cryptomator.cryptofs.CryptoPath;
 import org.cryptomator.cryptofs.CryptoPathMapper;
-import org.cryptomator.cryptofs.CryptoPathMapper.CiphertextDirectory;
+import org.cryptomator.cryptofs.common.Constants;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -15,6 +20,7 @@ import java.nio.file.DirectoryStream.Filter;
 import java.nio.file.FileSystem;
 import java.nio.file.Path;
 import java.nio.file.spi.FileSystemProvider;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,20 +35,15 @@ public class DirectoryStreamFactoryTest {
 	private final FileSystemProvider provider = mock(FileSystemProvider.class, "provider");
 	private final CryptoPathMapper cryptoPathMapper = mock(CryptoPathMapper.class);
 	private final DirectoryStreamComponent directoryStreamComp = mock(DirectoryStreamComponent.class);
-	private final DirectoryStreamComponent.Builder directoryStreamBuilder = mock(DirectoryStreamComponent.Builder.class);
+	private final DirectoryStreamComponent.Factory directoryStreamFactory = mock(DirectoryStreamComponent.Factory.class);
 
-	private final DirectoryStreamFactory inTest = new DirectoryStreamFactory(cryptoPathMapper, directoryStreamBuilder);
+	private final DirectoryStreamFactory inTest = new DirectoryStreamFactory(cryptoPathMapper, directoryStreamFactory);
 
 	@SuppressWarnings("unchecked")
 
 	@BeforeEach
 	public void setup() throws IOException {
-		when(directoryStreamBuilder.cleartextPath(Mockito.any())).thenReturn(directoryStreamBuilder);
-		when(directoryStreamBuilder.dirId(Mockito.any())).thenReturn(directoryStreamBuilder);
-		when(directoryStreamBuilder.ciphertextDirectoryStream(Mockito.any())).thenReturn(directoryStreamBuilder);
-		when(directoryStreamBuilder.filter(Mockito.any())).thenReturn(directoryStreamBuilder);
-		when(directoryStreamBuilder.onClose(Mockito.any())).thenReturn(directoryStreamBuilder);
-		when(directoryStreamBuilder.build()).thenReturn(directoryStreamComp);
+		when(directoryStreamFactory.create(any(),any(),any(),any(),any())).thenReturn(directoryStreamComp);
 		when(directoryStreamComp.directoryStream()).then(invocation -> mock(CryptoDirectoryStream.class));
 		when(fileSystem.provider()).thenReturn(provider);
 	}
@@ -95,12 +96,33 @@ public class DirectoryStreamFactoryTest {
 	public void testNewDirectoryStreamAfterClosedThrowsClosedFileSystemException() throws IOException {
 		CryptoPath path = mock(CryptoPath.class);
 		Filter<? super Path> filter = mock(Filter.class);
-		
+
 		inTest.close();
-		
+
 		Assertions.assertThrows(ClosedFileSystemException.class, () -> {
 			inTest.newDirectoryStream(path, filter);
 		});
+	}
+
+	@DisplayName("CiphertextDirStream only contains files with names at least 26 chars long and ending with .c9r or .c9s")
+	@ParameterizedTest
+	@MethodSource("provideFilterExamples")
+	public void testCiphertextDirStreamFilter(String fileName, boolean expected) {
+		Path p = Mockito.mock(Path.class);
+		Mockito.when(p.getFileName()).thenReturn(p);
+		Mockito.when(p.toString()).thenReturn(fileName);
+
+		boolean actual = inTest.matchesEncryptedContentPattern(p);
+
+		Assertions.assertEquals(expected, actual);
+	}
+
+	private static Stream<Arguments> provideFilterExamples() {
+		return Stream.of( //
+				Arguments.of("b".repeat(Constants.MIN_CIPHER_NAME_LENGTH - 5)+".c9r", false), //
+				Arguments.of("b".repeat(Constants.MIN_CIPHER_NAME_LENGTH - 5)+".c9s", false), //
+				Arguments.of("a".repeat(Constants.MIN_CIPHER_NAME_LENGTH - 4)+".c9r", true), //
+				Arguments.of("a".repeat(Constants.MIN_CIPHER_NAME_LENGTH - 4)+".c9s", true));
 	}
 
 }

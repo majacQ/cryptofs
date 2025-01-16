@@ -5,7 +5,7 @@ import org.cryptomator.cryptofs.health.api.DiagnosticResult;
 import java.nio.file.Path;
 import java.util.Map;
 
-import static org.cryptomator.cryptofs.health.api.CommonDetailKeys.DIR_ID_FILE;
+import static org.cryptomator.cryptofs.health.api.CommonDetailKeys.DIR_FILE;
 
 /**
  * A diagnostic result of an empty directory id file (dir.c9r).
@@ -44,6 +44,6 @@ public class EmptyDirFile implements DiagnosticResult {
 
 	@Override
 	public Map<String, String> details() {
-		return Map.of(DIR_ID_FILE, dirFile.toString());
+		return Map.of(DIR_FILE, dirFile.toString());
 	}
 }

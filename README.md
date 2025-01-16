@@ -1,11 +1,12 @@
 ![cryptomator](cryptomator.png)
 
 [![Build](https://github.com/cryptomator/cryptofs/workflows/Build/badge.svg)](https://github.com/cryptomator/cryptofs/actions?query=workflow%3ABuild)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/7248ca7d466843f785f79f33374302c2)](https://www.codacy.com/gh/cryptomator/cryptofs/dashboard)
-[![Codacy Badge](https://api.codacy.com/project/badge/Coverage/7248ca7d466843f785f79f33374302c2)](https://www.codacy.com/gh/cryptomator/cryptofs/dashboard)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=cryptomator_cryptofs&metric=alert_status)](https://sonarcloud.io/dashboard?id=cryptomator_cryptofs)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=cryptomator_cryptofs&metric=coverage)](https://sonarcloud.io/dashboard?id=cryptomator_cryptofs)
 [![Known Vulnerabilities](https://snyk.io/test/github/cryptomator/cryptofs/badge.svg)](https://snyk.io/test/github/cryptomator/cryptofs)
 
 **CryptoFS:** Implementation of the [Cryptomator](https://github.com/cryptomator/cryptomator) encryption scheme.
+For more info about the encryption scheme, read the [docs](https://docs.cryptomator.org/en/latest/security/vault/).
 
 ## Features
 
@@ -15,7 +16,7 @@
 
 ### Security Architecture
 
-For more information on the security details, visit [cryptomator.org](https://cryptomator.org/architecture/).
+For more information on the security details, visit [docs.cryptomator.org](https://docs.cryptomator.org/en/latest/security/architecture/).
 
 ## Audits
 
@@ -33,8 +34,13 @@ For more information on the security details, visit [cryptomator.org](https://cr
 ```java
 Path storageLocation = Paths.get("/home/cryptobot/vault");
 Files.createDirectories(storageLocation);
-CryptoFileSystemProvider.initialize(storageLocation, "masterkey.cryptomator", "password");
+Masterkey masterkey = Masterkey.generate(csprng));
+MasterkeyLoader loader = ignoredUri -> masterkey.copy(); //create a copy because the key handed over to init() method will be destroyed
+CryptoFileSystemProperties fsProps = CryptoFileSystemProperties.cryptoFileSystemProperties().withKeyLoader(loader).build();
+CryptoFileSystemProvider.initialize(storageLocation, fsProps, "myKeyId");
 ```
+
+The key material used for initialization and later de- & encryption is given by the [org.cryptomator.cryptolib.api.Masterkeyloader](https://github.com/cryptomator/cryptolib/blob/2.1.2/src/main/java/org/cryptomator/cryptolib/api/MasterkeyLoader.java) interface.
 
 ### Obtaining a FileSystem Instance
 
@@ -44,7 +50,7 @@ You have the option to use the convenience method `CryptoFileSystemProvider#newF
 FileSystem fileSystem = CryptoFileSystemProvider.newFileSystem(
 	storageLocation,
 	CryptoFileSystemProperties.cryptoFileSystemProperties()
-		.withPassphrase("password")
+		.withKeyLoader(ignoredUri -> masterkey.copy())
 		.withFlags(FileSystemFlags.READONLY) // readonly flag is optional of course
 		.build());
 ```
@@ -56,7 +62,7 @@ URI uri = CryptoFileSystemUri.create(storageLocation);
 FileSystem fileSystem = FileSystems.newFileSystem(
 		uri,
 		CryptoFileSystemProperties.cryptoFileSystemProperties()
-			.withPassphrase("password")
+            .withKeyLoader(ignoredUri -> masterkey.copy())
 			.withFlags(FileSystemFlags.READONLY) // readonly flag is optional of course
 			.build());
 ```
@@ -93,7 +99,7 @@ For more details on how to use the constructed `FileSystem`, you may consult the
 
 ### Dependencies
 
-* Java 17
+* Java 21
 * Maven 3
 
 ### Run Maven

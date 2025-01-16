@@ -1,13 +1,14 @@
 package org.cryptomator.cryptofs.fh;
 
+import com.google.common.jimfs.Configuration;
 import com.google.common.jimfs.Jimfs;
 import org.cryptomator.cryptofs.EffectiveOpenOptions;
 import org.cryptomator.cryptofs.ReadonlyFlag;
-import org.cryptomator.cryptofs.ch.ChannelCloseListener;
 import org.cryptomator.cryptofs.ch.ChannelComponent;
 import org.cryptomator.cryptofs.ch.CleartextFileChannel;
 import org.cryptomator.cryptolib.api.Cryptor;
 import org.cryptomator.cryptolib.api.FileHeader;
+import org.cryptomator.cryptolib.api.FileHeaderCryptor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Assumptions;
@@ -25,15 +26,19 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.FileSystem;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 public class OpenCryptoFileTest {
@@ -42,20 +47,19 @@ public class OpenCryptoFileTest {
 	private static AtomicReference<Path> CURRENT_FILE_PATH;
 	private ReadonlyFlag readonlyFlag = mock(ReadonlyFlag.class);
 	private FileCloseListener closeListener = mock(FileCloseListener.class);
-	private ChunkCache chunkCache = mock(ChunkCache.class);
 	private Cryptor cryptor = mock(Cryptor.class);
+	private FileHeaderCryptor fileHeaderCryptor = mock(FileHeaderCryptor.class);
 	private FileHeaderHolder headerHolder = mock(FileHeaderHolder.class);
-	private FileHeader header = mock(FileHeader.class);
 	private ChunkIO chunkIO = mock(ChunkIO.class);
-	private AtomicLong fileSize = new AtomicLong(-1l);
+	private AtomicLong fileSize = Mockito.mock(AtomicLong.class);
 	private AtomicReference<Instant> lastModified = new AtomicReference(Instant.ofEpochMilli(0));
 	private OpenCryptoFileComponent openCryptoFileComponent = mock(OpenCryptoFileComponent.class);
-	private ChannelComponent.Builder channelComponentBuilder = mock(ChannelComponent.Builder.class);
+	private ChannelComponent.Factory channelComponentFactory = mock(ChannelComponent.Factory.class);
 	private ChannelComponent channelComponent = mock(ChannelComponent.class);
 
 	@BeforeAll
 	public static void setup() {
-		FS = Jimfs.newFileSystem("OpenCryptoFileTest");
+		FS = Jimfs.newFileSystem("OpenCryptoFileTest", Configuration.unix().toBuilder().setAttributeViews("basic", "posix").build());
 		CURRENT_FILE_PATH = new AtomicReference<>(FS.getPath("currentFile"));
 	}
 
@@ -66,7 +70,7 @@ public class OpenCryptoFileTest {
 
 	@Test
 	public void testCloseTriggersCloseListener() {
-		OpenCryptoFile openCryptoFile = new OpenCryptoFile(closeListener, chunkCache, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
+		OpenCryptoFile openCryptoFile = new OpenCryptoFile(closeListener, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
 		openCryptoFile.close();
 		verify(closeListener).close(CURRENT_FILE_PATH.get(), openCryptoFile);
 	}
@@ -77,7 +81,7 @@ public class OpenCryptoFileTest {
 		UncheckedIOException expectedException = new UncheckedIOException(new IOException("fail!"));
 		EffectiveOpenOptions options = Mockito.mock(EffectiveOpenOptions.class);
 		Mockito.when(options.createOpenOptionsForEncryptedFile()).thenThrow(expectedException);
-		OpenCryptoFile openCryptoFile = new OpenCryptoFile(closeListener, chunkCache, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
+		OpenCryptoFile openCryptoFile = new OpenCryptoFile(closeListener, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
 
 		UncheckedIOException exception = Assertions.assertThrows(UncheckedIOException.class, () -> {
 			openCryptoFile.newFileChannel(options);
@@ -86,37 +90,124 @@ public class OpenCryptoFileTest {
 		verify(closeListener).close(CURRENT_FILE_PATH.get(), openCryptoFile);
 	}
 
+	@Test
+	@DisplayName("Opening a file channel with TRUNCATE_EXISTING calls truncate(0) on the cleartextChannel")
+	public void testCleartextChannelTruncateCalledOnTruncateExisting() throws IOException {
+		EffectiveOpenOptions options = EffectiveOpenOptions.from(EnumSet.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING), readonlyFlag);
+		var cleartextChannel = mock(CleartextFileChannel.class);
+		Mockito.when(headerHolder.get()).thenReturn(Mockito.mock(FileHeader.class));
+		Mockito.when(cryptor.fileHeaderCryptor()).thenReturn(fileHeaderCryptor);
+		Mockito.when(fileHeaderCryptor.headerSize()).thenReturn(42);
+		Mockito.when(openCryptoFileComponent.newChannelComponent()).thenReturn(channelComponentFactory);
+		Mockito.when(channelComponentFactory.create(any(), any(), any())).thenReturn(channelComponent);
+		Mockito.when(channelComponent.channel()).thenReturn(cleartextChannel);
+		OpenCryptoFile openCryptoFile = new OpenCryptoFile(closeListener, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
+
+		openCryptoFile.newFileChannel(options);
+		verify(cleartextChannel).truncate(0L);
+	}
+
+	@Nested
+	@DisplayName("Testing ::initFileHeader")
+	public class InitFilHeaderTests {
+
+		EffectiveOpenOptions options = Mockito.mock(EffectiveOpenOptions.class);
+		FileChannel cipherFileChannel = Mockito.mock(FileChannel.class, "cipherFilechannel");
+		OpenCryptoFile inTest = new OpenCryptoFile(closeListener, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
+
+		@Test
+		@DisplayName("Skip file header init, if the file header already exists in memory")
+		public void testInitFileHeaderExisting() throws IOException {
+			var header = Mockito.mock(FileHeader.class);
+			Mockito.when(headerHolder.get()).thenReturn(header);
+
+			inTest.initFileHeader(options, cipherFileChannel);
+
+			Mockito.verify(headerHolder, never()).loadExisting(any());
+			Mockito.verify(headerHolder, never()).createNew();
+		}
+
+		@Test
+		@DisplayName("Load file header from file, if not present and neither create nor create_new set")
+		public void testInitFileHeaderLoad() throws IOException {
+			Mockito.when(headerHolder.get()).thenThrow(new IllegalStateException("no Header set"));
+			Mockito.when(options.createNew()).thenReturn(false);
+			Mockito.when(options.create()).thenReturn(false);
+
+			inTest.initFileHeader(options, cipherFileChannel);
+
+			Mockito.verify(headerHolder, times(1)).loadExisting(cipherFileChannel);
+			Mockito.verify(headerHolder, never()).createNew();
+		}
+
+		@Test
+		@DisplayName("Create new file header, if not present and create_new set")
+		public void testInitFileHeaderCreateNew() throws IOException {
+			Mockito.when(headerHolder.get()).thenThrow(new IllegalStateException("no Header set"));
+			Mockito.when(options.createNew()).thenReturn(true);
+
+			inTest.initFileHeader(options, cipherFileChannel);
+
+			Mockito.verify(headerHolder, times(1)).createNew();
+			Mockito.verify(headerHolder, never()).loadExisting(any());
+		}
+
+		@Test
+		@DisplayName("Create new file header, if not present, create set and channel.size() == 0")
+		public void testInitFileHeaderCreateAndSize0() throws IOException {
+			Mockito.when(headerHolder.get()).thenThrow(new IllegalStateException("no Header set"));
+			Mockito.when(options.createNew()).thenReturn(false);
+			Mockito.when(options.create()).thenReturn(true);
+			Mockito.when(cipherFileChannel.size()).thenReturn(0L);
+
+			inTest.initFileHeader(options, cipherFileChannel);
+
+			Mockito.verify(headerHolder, times(1)).createNew();
+			Mockito.verify(headerHolder, never()).loadExisting(any());
+		}
+
+		@Test
+		@DisplayName("Load file header, if create is set but channel has size > 0")
+		public void testInitFileHeaderCreateAndSizeGreater0() throws IOException {
+			Mockito.when(headerHolder.get()).thenThrow(new IllegalStateException("no Header set"));
+			Mockito.when(options.createNew()).thenReturn(false);
+			Mockito.when(options.create()).thenReturn(true);
+			Mockito.when(cipherFileChannel.size()).thenReturn(42L);
+
+			inTest.initFileHeader(options, cipherFileChannel);
+
+			Mockito.verify(headerHolder, times(1)).loadExisting(cipherFileChannel);
+			Mockito.verify(headerHolder, never()).createNew();
+		}
+	}
+
 	@Nested
 	@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 	@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 	@DisplayName("FileChannels")
 	public class FileChannelFactoryTest {
 
+		private final AtomicLong realFileSize = new AtomicLong(-1L);
 		private OpenCryptoFile openCryptoFile;
 		private CleartextFileChannel cleartextFileChannel;
-		private AtomicReference<ChannelCloseListener> listener;
+		private AtomicReference<Consumer<FileChannel>> listener;
 		private AtomicReference<FileChannel> ciphertextChannel;
 
 		@BeforeAll
 		public void setup() throws IOException {
-			openCryptoFile = new OpenCryptoFile(closeListener, chunkCache, cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, fileSize, lastModified, openCryptoFileComponent);
+			FS = Jimfs.newFileSystem("OpenCryptoFileTest.FileChannelFactoryTest", Configuration.unix().toBuilder().setAttributeViews("basic", "posix").build());
+			CURRENT_FILE_PATH = new AtomicReference<>(FS.getPath("currentFile"));
+			openCryptoFile = new OpenCryptoFile(closeListener,cryptor, headerHolder, chunkIO, CURRENT_FILE_PATH, realFileSize, lastModified, openCryptoFileComponent);
 			cleartextFileChannel = mock(CleartextFileChannel.class);
 			listener = new AtomicReference<>();
 			ciphertextChannel = new AtomicReference<>();
 
-			Mockito.when(openCryptoFileComponent.newChannelComponent()).thenReturn(channelComponentBuilder);
-			Mockito.when(channelComponentBuilder.ciphertextChannel(Mockito.any())).thenAnswer(invocation -> {
+			Mockito.when(openCryptoFileComponent.newChannelComponent()).thenReturn(channelComponentFactory);
+			Mockito.when(channelComponentFactory.create(Mockito.any(), Mockito.any(), Mockito.any())).thenAnswer(invocation -> {
 				ciphertextChannel.set(invocation.getArgument(0));
-				return channelComponentBuilder;
+				listener.set(invocation.getArgument(2));
+				return channelComponent;
 			});
-			Mockito.when(channelComponentBuilder.openOptions(Mockito.any())).thenReturn(channelComponentBuilder);
-			Mockito.when(channelComponentBuilder.onClose(Mockito.any())).thenAnswer(invocation -> {
-				listener.set(invocation.getArgument(0));
-				return channelComponentBuilder;
-			});
-			Mockito.when(channelComponentBuilder.fileHeader(Mockito.any())).thenReturn(channelComponentBuilder);
-			Mockito.when(channelComponentBuilder.mustWriteHeader(Mockito.anyBoolean())).thenReturn(channelComponentBuilder);
-			Mockito.when(channelComponentBuilder.build()).thenReturn(channelComponent);
 			Mockito.when(channelComponent.channel()).thenReturn(cleartextFileChannel);
 		}
 
@@ -131,8 +222,9 @@ public class OpenCryptoFileTest {
 		@Order(10)
 		@DisplayName("create first FileChannel")
 		public void createFileChannel() throws IOException {
+			var attrs = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-x---"));
 			EffectiveOpenOptions options = EffectiveOpenOptions.from(EnumSet.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE), readonlyFlag);
-			FileChannel ch = openCryptoFile.newFileChannel(options);
+			FileChannel ch = openCryptoFile.newFileChannel(options, attrs);
 			Assertions.assertSame(cleartextFileChannel, ch);
 			verify(chunkIO).registerChannel(ciphertextChannel.get(), true);
 		}
@@ -167,17 +259,6 @@ public class OpenCryptoFileTest {
 			Assertions.assertEquals(0l, openCryptoFile.size().get());
 		}
 
-
-		@Test
-		@Order(20)
-		@DisplayName("TRUNCATE_EXISTING leads to chunk cache invalidation")
-		public void testTruncateExistingInvalidatesChunkCache() throws IOException {
-			Files.write(CURRENT_FILE_PATH.get(), new byte[0]);
-			EffectiveOpenOptions options = EffectiveOpenOptions.from(EnumSet.of(StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE), readonlyFlag);
-			openCryptoFile.newFileChannel(options);
-			verify(chunkCache).invalidateAll();
-		}
-
 		@Test
 		@Order(100)
 		@DisplayName("closeListener triggers chunkIO.unregisterChannel()")
@@ -185,7 +266,7 @@ public class OpenCryptoFileTest {
 			Assumptions.assumeTrue(listener.get() != null);
 			Assumptions.assumeTrue(ciphertextChannel.get() != null);
 
-			listener.get().closed(cleartextFileChannel);
+			listener.get().accept(ciphertextChannel.get());
 			verify(chunkIO).unregisterChannel(ciphertextChannel.get());
 		}
 

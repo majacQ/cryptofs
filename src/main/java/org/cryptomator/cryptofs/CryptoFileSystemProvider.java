@@ -142,8 +142,8 @@ public class CryptoFileSystemProvider extends FileSystemProvider {
 			throw new NotDirectoryException(pathToVault.toString());
 		}
 		byte[] rawKey = new byte[0];
-		var config = VaultConfig.createNew().cipherCombo(properties.cipherCombo()).shorteningThreshold(Constants.DEFAULT_SHORTENING_THRESHOLD).build();
-		try (Masterkey key = properties.keyLoader().loadKey(keyId);
+		var config = VaultConfig.createNew().cipherCombo(properties.cipherCombo()).shorteningThreshold(properties.shorteningThreshold()).build();
+		try (Masterkey key = properties.keyLoader().loadKey(keyId); //
 			 Cryptor cryptor = CryptorProvider.forScheme(config.getCipherCombo()).provide(key, strongSecureRandom())) {
 			rawKey = key.getEncoded();
 			// save vault config:
@@ -154,10 +154,12 @@ public class CryptoFileSystemProvider extends FileSystemProvider {
 			String dirHash = cryptor.fileNameCryptor().hashDirectoryId(Constants.ROOT_DIR_ID);
 			Path vaultCipherRootPath = pathToVault.resolve(Constants.DATA_DIR_NAME).resolve(dirHash.substring(0, 2)).resolve(dirHash.substring(2));
 			Files.createDirectories(vaultCipherRootPath);
+			// create dirId backup:
+			DirectoryIdBackup.write(cryptor, new CiphertextDirectory(Constants.ROOT_DIR_ID, vaultCipherRootPath));
 		} finally {
 			Arrays.fill(rawKey, (byte) 0x00);
 		}
-		assert checkDirStructureForVault(pathToVault, properties.vaultConfigFilename(), properties.masterkeyFilename()) == DirStructure.VAULT;
+		assert checkDirStructureForVault(pathToVault, properties.vaultConfigFilename(), null) == DirStructure.VAULT;
 	}
 
 	/**

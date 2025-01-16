@@ -41,7 +41,6 @@ public class CryptoFileSystemsTest {
 	private final Path dataDirPath = mock(Path.class, "normalizedVaultPath/d");
 	private final Path preContenRootPath = mock(Path.class, "normalizedVaultPath/d/AB");
 	private final Path contenRootPath = mock(Path.class, "normalizedVaultPath/d/AB/CDEFGHIJKLMNOP");
-	private final FileSystemCapabilityChecker capabilityChecker = mock(FileSystemCapabilityChecker.class);
 	private final CryptoFileSystemProvider provider = mock(CryptoFileSystemProvider.class);
 	private final CryptoFileSystemProperties properties = mock(CryptoFileSystemProperties.class);
 	private final CryptoFileSystemComponent cryptoFileSystemComponent = mock(CryptoFileSystemComponent.class);
@@ -57,7 +56,7 @@ public class CryptoFileSystemsTest {
 	private final CryptorProvider cryptorProvider = mock(CryptorProvider.class);
 	private final Cryptor cryptor = mock(Cryptor.class);
 	private final FileNameCryptor fileNameCryptor = mock(FileNameCryptor.class);
-	private final CryptoFileSystemComponent.Builder cryptoFileSystemComponentBuilder = mock(CryptoFileSystemComponent.Builder.class);
+	private final CryptoFileSystemComponent.Factory cryptoFileSystemComponentFactory = mock(CryptoFileSystemComponent.Factory.class);
 
 
 	private MockedStatic<VaultConfig> vaultConficClass;
@@ -65,14 +64,14 @@ public class CryptoFileSystemsTest {
 	private MockedStatic<CryptorProvider> cryptorProviderClass;
 	private MockedStatic<BackupHelper> backupHelperClass;
 
-	private final CryptoFileSystems inTest = new CryptoFileSystems(cryptoFileSystemComponentBuilder, capabilityChecker, csprng);
+	private final CryptoFileSystems inTest = new CryptoFileSystems(cryptoFileSystemComponentFactory, csprng);
 
 	@BeforeEach
 	public void setup() throws IOException, MasterkeyLoadingFailedException {
 		vaultConficClass = Mockito.mockStatic(VaultConfig.class);
-		filesClass = Mockito.mockStatic(Files.class);
 		cryptorProviderClass = Mockito.mockStatic(CryptorProvider.class);
 		backupHelperClass = Mockito.mockStatic(BackupHelper.class);
+		filesClass = Mockito.mockStatic(Files.class);
 
 		when(pathToVault.normalize()).thenReturn(normalizedPathToVault);
 		when(normalizedPathToVault.resolve("vault.cryptomator")).thenReturn(configFilePath);
@@ -96,12 +95,7 @@ public class CryptoFileSystemsTest {
 		when(dataDirPath.resolve("AB")).thenReturn(preContenRootPath);
 		when(preContenRootPath.resolve("CDEFGHIJKLMNOP")).thenReturn(contenRootPath);
 		filesClass.when(() -> Files.exists(contenRootPath)).thenReturn(true);
-		when(cryptoFileSystemComponentBuilder.cryptor(any())).thenReturn(cryptoFileSystemComponentBuilder);
-		when(cryptoFileSystemComponentBuilder.vaultConfig(any())).thenReturn(cryptoFileSystemComponentBuilder);
-		when(cryptoFileSystemComponentBuilder.pathToVault(any())).thenReturn(cryptoFileSystemComponentBuilder);
-		when(cryptoFileSystemComponentBuilder.properties(any())).thenReturn(cryptoFileSystemComponentBuilder);
-		when(cryptoFileSystemComponentBuilder.provider(any())).thenReturn(cryptoFileSystemComponentBuilder);
-		when(cryptoFileSystemComponentBuilder.build()).thenReturn(cryptoFileSystemComponent);
+		when(cryptoFileSystemComponentFactory.create(any(),any(),any(),any(),any())).thenReturn(cryptoFileSystemComponent);
 		when(cryptoFileSystemComponent.cryptoFileSystem()).thenReturn(cryptoFileSystem);
 	}
 
@@ -124,12 +118,7 @@ public class CryptoFileSystemsTest {
 
 		Assertions.assertSame(cryptoFileSystem, impl);
 		Assertions.assertTrue(inTest.contains(cryptoFileSystem));
-		verify(cryptoFileSystemComponentBuilder).cryptor(cryptor);
-		verify(cryptoFileSystemComponentBuilder).vaultConfig(vaultConfig);
-		verify(cryptoFileSystemComponentBuilder).pathToVault(normalizedPathToVault);
-		verify(cryptoFileSystemComponentBuilder).properties(properties);
-		verify(cryptoFileSystemComponentBuilder).provider(provider);
-		verify(cryptoFileSystemComponentBuilder).build();
+		verify(cryptoFileSystemComponentFactory,Mockito.times(1)).create(cryptor, vaultConfig, provider, normalizedPathToVault, properties);
 	}
 
 	@Test

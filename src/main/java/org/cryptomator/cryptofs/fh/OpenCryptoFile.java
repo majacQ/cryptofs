@@ -1,18 +1,8 @@
-/*******************************************************************************
- * Copyright (c) 2016 Sebastian Stenzel and others.
- * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the accompanying LICENSE.txt.
- *
- * Contributors:
- *     Sebastian Stenzel - initial API and implementation
- *******************************************************************************/
 package org.cryptomator.cryptofs.fh;
 
 import org.cryptomator.cryptofs.EffectiveOpenOptions;
-import org.cryptomator.cryptofs.ch.ChannelComponent;
 import org.cryptomator.cryptofs.ch.CleartextFileChannel;
 import org.cryptomator.cryptolib.api.Cryptor;
-import org.cryptomator.cryptolib.api.FileHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,11 +11,11 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -36,19 +26,20 @@ public class OpenCryptoFile implements Closeable {
 
 	private final FileCloseListener listener;
 	private final AtomicReference<Instant> lastModified;
-	private final ChunkCache chunkCache;
 	private final Cryptor cryptor;
 	private final FileHeaderHolder headerHolder;
 	private final ChunkIO chunkIO;
 	private final AtomicReference<Path> currentFilePath;
 	private final AtomicLong fileSize;
 	private final OpenCryptoFileComponent component;
-	private final ConcurrentMap<CleartextFileChannel, FileChannel> openChannels = new ConcurrentHashMap<>();
+
+	private final AtomicInteger openChannelsCount = new AtomicInteger(0);
 
 	@Inject
-	public OpenCryptoFile(FileCloseListener listener, ChunkCache chunkCache, Cryptor cryptor, FileHeaderHolder headerHolder, ChunkIO chunkIO, @CurrentOpenFilePath AtomicReference<Path> currentFilePath, @OpenFileSize AtomicLong fileSize, @OpenFileModifiedDate AtomicReference<Instant> lastModified, OpenCryptoFileComponent component) {
+	public OpenCryptoFile(FileCloseListener listener, Cryptor cryptor, FileHeaderHolder headerHolder, ChunkIO chunkIO, //
+						  @CurrentOpenFilePath AtomicReference<Path> currentFilePath, @OpenFileSize AtomicLong fileSize, //
+						  @OpenFileModifiedDate AtomicReference<Instant> lastModified, OpenCryptoFileComponent component) {
 		this.listener = listener;
-		this.chunkCache = chunkCache;
 		this.cryptor = cryptor;
 		this.headerHolder = headerHolder;
 		this.chunkIO = chunkIO;
@@ -65,49 +56,52 @@ public class OpenCryptoFile implements Closeable {
 	 * @return A new file channel. Ideally used in a try-with-resource statement. If the channel is not properly closed, this OpenCryptoFile will stay open indefinite.
 	 * @throws IOException
 	 */
-	public synchronized FileChannel newFileChannel(EffectiveOpenOptions options) throws IOException {
+	public synchronized FileChannel newFileChannel(EffectiveOpenOptions options, FileAttribute<?>... attrs) throws IOException {
 		Path path = currentFilePath.get();
-
-		if (options.truncateExisting()) {
-			chunkCache.invalidateAll();
+		if (path == null) {
+			throw new IllegalStateException("Cannot create file channel to deleted file");
 		}
-
 		FileChannel ciphertextFileChannel = null;
 		CleartextFileChannel cleartextFileChannel = null;
+
+		openChannelsCount.incrementAndGet(); // synchronized context, hence we can proactively increase the number
 		try {
-			ciphertextFileChannel = path.getFileSystem().provider().newFileChannel(path, options.createOpenOptionsForEncryptedFile());
-			final FileHeader header;
-			final boolean isNewHeader;
-			if (ciphertextFileChannel.size() == 0l) {
-				header = headerHolder.createNew();
-				isNewHeader = true;
-			} else {
-				header = headerHolder.loadExisting(ciphertextFileChannel);
-				isNewHeader = false;
-			}
+			ciphertextFileChannel = path.getFileSystem().provider().newFileChannel(path, options.createOpenOptionsForEncryptedFile(), attrs);
+			initFileHeader(options, ciphertextFileChannel);
 			initFileSize(ciphertextFileChannel);
-			ChannelComponent channelComponent = component.newChannelComponent() //
-					.ciphertextChannel(ciphertextFileChannel) //
-					.openOptions(options) //
-					.onClose(this::channelClosed) //
-					.mustWriteHeader(isNewHeader) //
-					.fileHeader(header) //
-					.build();
-			cleartextFileChannel = channelComponent.channel();
+			cleartextFileChannel = component.newChannelComponent() //
+					.create(ciphertextFileChannel, options, this::cleartextChannelClosed) //
+					.channel();
+			if (options.truncateExisting()) {
+				cleartextFileChannel.truncate(0);
+			}
 		} finally {
 			if (cleartextFileChannel == null) { // i.e. something didn't work
+				cleartextChannelClosed(ciphertextFileChannel);
 				closeQuietly(ciphertextFileChannel);
-				// is this the first file channel to be opened?
-				if (openChannels.isEmpty()) {
-					close(); // then also close the file again.
-				}
 			}
 		}
 
 		assert cleartextFileChannel != null; // otherwise there would have been an exception
-		openChannels.put(cleartextFileChannel, ciphertextFileChannel);
 		chunkIO.registerChannel(ciphertextFileChannel, options.writable());
 		return cleartextFileChannel;
+	}
+
+	//visible for testing
+	void initFileHeader(EffectiveOpenOptions options, FileChannel ciphertextFileChannel) throws IOException {
+		try {
+			headerHolder.get();
+		} catch (IllegalStateException e) {
+			//first file channel to file
+			if (options.createNew() || (options.create() && ciphertextFileChannel.size() == 0)) {
+				//file did not exist, create new header
+				//file size will never be zero again, once the header is written because we retain on truncation the header
+				headerHolder.createNew();
+			} else {
+				//file must exist, load header from file
+				headerHolder.loadExisting(ciphertextFileChannel);
+			}
+		}
 	}
 
 	private void closeQuietly(Closeable closeable) {
@@ -121,7 +115,7 @@ public class OpenCryptoFile implements Closeable {
 	}
 
 	/**
-	 * Called by {@link #newFileChannel(EffectiveOpenOptions)} to determine the fileSize.
+	 * Called by {@link #newFileChannel(EffectiveOpenOptions, FileAttribute[])} to determine the fileSize.
 	 * <p>
 	 * Before the size is initialized (i.e. before a channel has been created), {@link #size()} must not be called.
 	 * <p>
@@ -146,7 +140,7 @@ public class OpenCryptoFile implements Closeable {
 	}
 
 	/**
-	 * @return The size of the opened file. Note that the filesize is unknown until a {@link #newFileChannel(EffectiveOpenOptions) file channel is opened}. In this case this method returns an empty optional.
+	 * @return The size of the opened file. Note that the filesize is unknown until a {@link #newFileChannel(EffectiveOpenOptions, FileAttribute[])} is opened. In this case this method returns an empty optional.
 	 */
 	public Optional<Long> size() {
 		long val = fileSize.get();
@@ -169,27 +163,29 @@ public class OpenCryptoFile implements Closeable {
 		return currentFilePath.get();
 	}
 
-	public void setCurrentFilePath(Path currentFilePath) {
-		this.currentFilePath.set(currentFilePath);
+	/**
+	 * Updates the current ciphertext file path, if it is not already set to null (i.e., the openCryptoFile is deleted)
+	 * @param newFilePath new ciphertext path
+	 */
+	public void updateCurrentFilePath(Path newFilePath) {
+		currentFilePath.updateAndGet(p -> p == null ? null : newFilePath);
 	}
 
-	private synchronized void channelClosed(CleartextFileChannel cleartextFileChannel) throws IOException {
-		try {
-			FileChannel ciphertextFileChannel = openChannels.remove(cleartextFileChannel);
-			if (ciphertextFileChannel != null) {
-				chunkIO.unregisterChannel(ciphertextFileChannel);
-				ciphertextFileChannel.close();
-			}
-		} finally {
-			if (openChannels.isEmpty()) {
-				close();
-			}
+	private synchronized void cleartextChannelClosed(FileChannel ciphertextFileChannel) {
+		if (ciphertextFileChannel != null) {
+			chunkIO.unregisterChannel(ciphertextFileChannel);
+		}
+		if (openChannelsCount.decrementAndGet() == 0) {
+			close();
 		}
 	}
 
 	@Override
 	public void close() {
-		listener.close(currentFilePath.get(), this);
+		var p = currentFilePath.get();
+		if(p != null) {
+			listener.close(p, this);
+		}
 	}
 
 	@Override

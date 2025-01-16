@@ -174,7 +174,7 @@ public class EffectiveOpenOptions {
 	}
 
 	private boolean isSupported(OpenOption option) {
-		return StandardOpenOption.class.isInstance(option) || LinkOption.class.isInstance(option);
+		return option instanceof StandardOpenOption || option instanceof LinkOption;
 	}
 
 	public Set<OpenOption> createOpenOptionsForEncryptedFile() {
@@ -182,6 +182,7 @@ public class EffectiveOpenOptions {
 		result.add(READ); // also needed during write
 		result.remove(LinkOption.NOFOLLOW_LINKS);
 		result.remove(APPEND);
+		result.remove(TRUNCATE_EXISTING);
 		return result;
 	}
 

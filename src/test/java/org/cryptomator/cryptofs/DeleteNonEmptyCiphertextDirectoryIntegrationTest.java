@@ -16,6 +16,7 @@ import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
@@ -28,6 +29,7 @@ import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
@@ -137,7 +139,7 @@ public class DeleteNonEmptyCiphertextDirectoryIntegrationTest {
 
 		// a
 		// .. LongNameaaa...
-		String name = "LongName" + Strings.repeat("a", Constants.DEFAULT_SHORTENING_THRESHOLD);
+		String name = "LongName" + Strings.repeat("a", CryptoFileSystemProperties.DEFAULT_SHORTENING_THRESHOLD);
 		createFolder(cleartextDirectory, name);
 
 		Assertions.assertThrows(DirectoryNotEmptyException.class, () -> {
@@ -159,19 +161,33 @@ public class DeleteNonEmptyCiphertextDirectoryIntegrationTest {
 		try (Stream<Path> allFilesInVaultDir = Files.walk(pathToVault)) {
 			return allFilesInVaultDir //
 					.filter(Files::isDirectory) //
-					.filter(this::isEmptyDirectory) //
+					.filter(this::isEmptyCryptoFsDirectory) //
 					.filter(this::isEncryptedDirectory) //
 					.findFirst() //
 					.get();
 		}
 	}
 
-	private boolean isEmptyDirectory(Path path) {
+	private boolean isEmptyCryptoFsDirectory(Path path) {
+		Predicate<Path> isIgnoredFile = p -> Constants.DIR_ID_BACKUP_FILE_NAME.equals(p.getFileName().toString());
 		try (Stream<Path> files = Files.list(path)) {
-			return files.count() == 0;
+			return files.noneMatch(isIgnoredFile.negate());
 		} catch (IOException e) {
 			throw new UncheckedIOException(e);
 		}
+	}
+
+	@Test
+	@DisplayName("Tests internal cryptofs directory emptiness definition")
+	public void testCryptoFsDirEmptiness() throws IOException {
+		var emptiness = pathToVault.getParent().resolve("emptiness");
+		var ignoredFile = emptiness.resolve(Constants.DIR_ID_BACKUP_FILE_NAME);
+		Files.createDirectory(emptiness);
+		Files.createFile(ignoredFile);
+
+		boolean result = isEmptyCryptoFsDirectory(emptiness);
+
+		Assertions.assertTrue(result, "Ciphertext directory containing only dirId-file should be accepted as an empty dir");
 	}
 
 	private boolean isEncryptedDirectory(Path pathInVault) {

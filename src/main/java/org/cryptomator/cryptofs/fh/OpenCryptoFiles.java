@@ -12,7 +12,6 @@ import org.cryptomator.cryptofs.CryptoFileSystemScoped;
 import org.cryptomator.cryptofs.EffectiveOpenOptions;
 
 import javax.inject.Inject;
-import javax.inject.Provider;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.BufferUnderflowException;
@@ -30,12 +29,12 @@ import java.util.concurrent.ConcurrentMap;
 @CryptoFileSystemScoped
 public class OpenCryptoFiles implements Closeable {
 
-	private final Provider<OpenCryptoFileComponent.Builder> openCryptoFileComponentBuilderProvider;
+	private final OpenCryptoFileComponent.Factory openCryptoFileComponentFactory;
 	private final ConcurrentMap<Path, OpenCryptoFile> openCryptoFiles = new ConcurrentHashMap<>();
 
 	@Inject
-	OpenCryptoFiles(Provider<OpenCryptoFileComponent.Builder> openCryptoFileComponentBuilderProvider) {
-		this.openCryptoFileComponentBuilderProvider = openCryptoFileComponentBuilderProvider;
+	OpenCryptoFiles(OpenCryptoFileComponent.Factory openCryptoFileComponentFactory) {
+		this.openCryptoFileComponentFactory = openCryptoFileComponentFactory;
 	}
 
 	/**
@@ -52,7 +51,7 @@ public class OpenCryptoFiles implements Closeable {
 	}
 
 	/**
-	 * Opens a file to {@link OpenCryptoFile#newFileChannel(EffectiveOpenOptions) retrieve a FileChannel}. If this file is already opened, a shared instance is returned.
+	 * Opens a file to {@link OpenCryptoFile#newFileChannel(EffectiveOpenOptions, java.nio.file.attribute.FileAttribute[]) retrieve a FileChannel}. If this file is already opened, a shared instance is returned.
 	 * Getting the file channel should be the next invocation, since the {@link OpenFileScoped lifecycle} of the OpenFile strictly depends on the lifecycle of the channel.
 	 *
 	 * @param ciphertextPath Path of the file to open
@@ -61,16 +60,7 @@ public class OpenCryptoFiles implements Closeable {
 	 */
 	public OpenCryptoFile getOrCreate(Path ciphertextPath) {
 		Path normalizedPath = ciphertextPath.toAbsolutePath().normalize();
-		return openCryptoFiles.computeIfAbsent(normalizedPath, this::create); // computeIfAbsent is atomic, "create" is called at most once
-	}
-
-	private OpenCryptoFile create(Path normalizedPath) {
-		OpenCryptoFileComponent.Builder builder = openCryptoFileComponentBuilderProvider.get();
-		OpenCryptoFileComponent openCryptoFileComponent = builder //
-				.path(normalizedPath) //
-				.onClose(openCryptoFiles::remove) //
-				.build();
-		return openCryptoFileComponent.openCryptoFile();
+		return openCryptoFiles.computeIfAbsent(normalizedPath, p -> openCryptoFileComponentFactory.create(p, openCryptoFiles::remove).openCryptoFile()); // computeIfAbsent is atomic, "create" is called at most once
 	}
 
 	public void writeCiphertextFile(Path ciphertextPath, EffectiveOpenOptions openOptions, ByteBuffer contents) throws IOException {
@@ -89,6 +79,20 @@ public class OpenCryptoFiles implements Closeable {
 			buf.flip();
 			return buf;
 		}
+	}
+
+	/**
+	 * Removes a ciphertextPath to {@link OpenCryptoFile} mapping, if it exists, and sets the path of the openCryptoFile to null.
+	 *
+	 * @param ciphertextPath The ciphertext file path to invalidate
+	 */
+	public void delete(Path ciphertextPath) {
+		openCryptoFiles.compute(ciphertextPath, (p, openFile) -> {
+			if (openFile != null) {
+				openFile.updateCurrentFilePath(null);
+			}
+			return null;
+		});
 	}
 
 	/**
@@ -147,7 +151,7 @@ public class OpenCryptoFiles implements Closeable {
 				throw new IllegalStateException();
 			}
 			if (openCryptoFile != null) {
-				openCryptoFile.setCurrentFilePath(dst);
+				openCryptoFile.updateCurrentFilePath(dst);
 			}
 			openCryptoFiles.remove(src, openCryptoFile);
 			committed = true;

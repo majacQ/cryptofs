@@ -45,6 +45,15 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 	static final int DEFAULT_MAX_CLEARTEXT_NAME_LENGTH = LongFileNameProvider.MAX_FILENAME_BUFFER_SIZE;
 
 	/**
+	 * Shortening threshold for ciphertext filenames.
+	 *
+	 * @since 2.5.0
+	 */
+	public static final String PROPERTY_SHORTENING_THRESHOLD = "shorteningThreshold";
+
+	static final int DEFAULT_SHORTENING_THRESHOLD = 220;
+
+	/**
 	 * Key identifying the key loader used during initialization.
 	 *
 	 * @since 2.0.0
@@ -64,7 +73,9 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 	 * Key identifying the name of the masterkey file located inside the vault directory.
 	 *
 	 * @since 1.1.0
+	 * @deprecated Replaced with {@link #PROPERTY_KEYLOADER external keyloader} API
 	 */
+	@Deprecated
 	public static final String PROPERTY_MASTERKEY_FILENAME = "masterkeyFilename";
 
 	static final String DEFAULT_MASTERKEY_FILENAME = "masterkey.cryptomator";
@@ -103,6 +114,7 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 				Map.entry(PROPERTY_VAULTCONFIG_FILENAME, builder.vaultConfigFilename), //
 				Map.entry(PROPERTY_MASTERKEY_FILENAME, builder.masterkeyFilename), //
 				Map.entry(PROPERTY_MAX_CLEARTEXT_NAME_LENGTH, builder.maxCleartextNameLength), //
+				Map.entry(PROPERTY_SHORTENING_THRESHOLD, builder.shorteningThreshold), //
 				Map.entry(PROPERTY_CIPHER_COMBO, builder.cipherCombo) //
 		);
 	}
@@ -128,12 +140,17 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 		return (String) get(PROPERTY_VAULTCONFIG_FILENAME);
 	}
 
+	@Deprecated
 	String masterkeyFilename() {
 		return (String) get(PROPERTY_MASTERKEY_FILENAME);
 	}
 
 	int maxCleartextNameLength() {
 		return (int) get(PROPERTY_MAX_CLEARTEXT_NAME_LENGTH);
+	}
+
+	int shorteningThreshold() {
+		return (int) get(PROPERTY_SHORTENING_THRESHOLD);
 	}
 
 	@Override
@@ -190,6 +207,7 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 		private String vaultConfigFilename = DEFAULT_VAULTCONFIG_FILENAME;
 		private String masterkeyFilename = DEFAULT_MASTERKEY_FILENAME;
 		private int maxCleartextNameLength = DEFAULT_MAX_CLEARTEXT_NAME_LENGTH;
+		private int shorteningThreshold = DEFAULT_SHORTENING_THRESHOLD;
 
 		private Builder() {
 		}
@@ -200,6 +218,7 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 			checkedSet(String.class, PROPERTY_MASTERKEY_FILENAME, properties, this::withMasterkeyFilename);
 			checkedSet(Set.class, PROPERTY_FILESYSTEM_FLAGS, properties, this::withFlags);
 			checkedSet(Integer.class, PROPERTY_MAX_CLEARTEXT_NAME_LENGTH, properties, this::withMaxCleartextNameLength);
+			checkedSet(Integer.class, PROPERTY_SHORTENING_THRESHOLD, properties, this::withShorteningThreshold);
 			checkedSet(CryptorProvider.Scheme.class, PROPERTY_CIPHER_COMBO, properties, this::withCipherCombo);
 		}
 
@@ -225,6 +244,18 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 		 */
 		public Builder withMaxCleartextNameLength(int maxCleartextNameLength) {
 			this.maxCleartextNameLength = maxCleartextNameLength;
+			return this;
+		}
+
+		/**
+		 * Sets the shortening threshold used during vault initialization.
+		 *
+		 * @param shorteningThreshold The maximum ciphertext filename length not to be shortened
+		 * @return this
+		 * @since 2.5.0
+		 */
+		public Builder withShorteningThreshold(int shorteningThreshold) {
+			this.shorteningThreshold = shorteningThreshold;
 			return this;
 		}
 
@@ -295,7 +326,9 @@ public class CryptoFileSystemProperties extends AbstractMap<String, Object> {
 		 * @param masterkeyFilename the filename of the json file containing configuration to decrypt the masterkey
 		 * @return this
 		 * @since 1.1.0
+		 * @deprecated Supply a {@link #withKeyLoader(MasterkeyLoader) keyloader} instead.
 		 */
+		@Deprecated
 		public Builder withMasterkeyFilename(String masterkeyFilename) {
 			this.masterkeyFilename = masterkeyFilename;
 			return this;

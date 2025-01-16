@@ -33,14 +33,12 @@ class CryptoFileSystems {
 	private static final Logger LOG = LoggerFactory.getLogger(CryptoFileSystems.class);
 
 	private final ConcurrentMap<Path, CryptoFileSystemImpl> fileSystems = new ConcurrentHashMap<>();
-	private final CryptoFileSystemComponent.Builder cryptoFileSystemComponentBuilder; // sharing reusable builder via synchronized
-	private final FileSystemCapabilityChecker capabilityChecker;
+	private final CryptoFileSystemComponent.Factory cryptoFileSystemComponentFactory;
 	private final SecureRandom csprng;
 
 	@Inject
-	public CryptoFileSystems(CryptoFileSystemComponent.Builder cryptoFileSystemComponentBuilder, FileSystemCapabilityChecker capabilityChecker, SecureRandom csprng) {
-		this.cryptoFileSystemComponentBuilder = cryptoFileSystemComponentBuilder;
-		this.capabilityChecker = capabilityChecker;
+	public CryptoFileSystems(CryptoFileSystemComponent.Factory cryptoFileSystemComponentFactory, SecureRandom csprng) {
+		this.cryptoFileSystemComponentFactory = cryptoFileSystemComponentFactory;
 		this.csprng = csprng;
 	}
 
@@ -53,13 +51,12 @@ class CryptoFileSystems {
 		try (Masterkey key = properties.keyLoader().loadKey(keyId)) {
 			var config = configLoader.verify(key.getEncoded(), Constants.VAULT_VERSION);
 			backupVaultConfigFile(normalizedPathToVault, properties);
-			var adjustedProperties = adjustForCapabilities(pathToVault, properties);
 			var cryptor = CryptorProvider.forScheme(config.getCipherCombo()).provide(key.copy(), csprng);
 			try {
 				checkVaultRootExistence(pathToVault, cryptor);
 				return fileSystems.compute(normalizedPathToVault, (path, fs) -> {
 					if (fs == null) {
-						return create(provider, normalizedPathToVault, adjustedProperties, cryptor, config);
+						return cryptoFileSystemComponentFactory.create(cryptor, config, provider, normalizedPathToVault, properties).cryptoFileSystem();
 					} else {
 						throw new FileSystemAlreadyExistsException();
 					}
@@ -86,18 +83,6 @@ class CryptoFileSystems {
 		}
 	}
 
-	// synchronized access to non-threadsafe cryptoFileSystemComponentBuilder required
-	private synchronized CryptoFileSystemImpl create(CryptoFileSystemProvider provider, Path pathToVault, CryptoFileSystemProperties properties, Cryptor cryptor, VaultConfig config) {
-		return cryptoFileSystemComponentBuilder //
-				.cryptor(cryptor) //
-				.vaultConfig(config) //
-				.pathToVault(pathToVault) //
-				.properties(properties) //
-				.provider(provider) //
-				.build() //
-				.cryptoFileSystem();
-	}
-
 	/**
 	 * Attempts to read a vault config file
 	 *
@@ -112,9 +97,10 @@ class CryptoFileSystems {
 		try {
 			return Files.readString(vaultConfigFile, StandardCharsets.US_ASCII);
 		} catch (NoSuchFileException e) {
-			Path masterkeyPath = pathToVault.resolve(properties.masterkeyFilename());
-			if (Files.exists(masterkeyPath)) {
-				LOG.warn("Failed to read {}, but found {}}", vaultConfigFile, masterkeyPath);
+			// TODO: remove this check and tell downstream users to check the vault dir structure before creating a CryptoFileSystemImpl
+			@SuppressWarnings("deprecation") var masterkeyFilename = properties.masterkeyFilename();
+			if (masterkeyFilename != null && Files.exists(pathToVault.resolve(masterkeyFilename))) {
+				LOG.warn("Failed to read {}, but found {}}", vaultConfigFile, masterkeyFilename);
 				throw new FileSystemNeedsMigrationException(pathToVault);
 			} else {
 				throw e;
@@ -132,23 +118,6 @@ class CryptoFileSystems {
 	private void backupVaultConfigFile(Path pathToVault, CryptoFileSystemProperties properties) throws IOException {
 		Path vaultConfigFile = pathToVault.resolve(properties.vaultConfigFilename());
 		BackupHelper.attemptBackup(vaultConfigFile);
-	}
-
-	private CryptoFileSystemProperties adjustForCapabilities(Path pathToVault, CryptoFileSystemProperties originalProperties) throws FileSystemCapabilityChecker.MissingCapabilityException {
-		if (!originalProperties.readonly()) {
-			try {
-				capabilityChecker.assertWriteAccess(pathToVault);
-				return originalProperties;
-			} catch (FileSystemCapabilityChecker.MissingCapabilityException e) {
-				capabilityChecker.assertReadAccess(pathToVault);
-				LOG.warn("No write access to vault. Fallback to read-only access.");
-				Set<CryptoFileSystemProperties.FileSystemFlags> flags = EnumSet.copyOf(originalProperties.flags());
-				flags.add(CryptoFileSystemProperties.FileSystemFlags.READONLY);
-				return CryptoFileSystemProperties.cryptoFileSystemPropertiesFrom(originalProperties).withFlags(flags).build();
-			}
-		} else {
-			return originalProperties;
-		}
 	}
 
 	public void remove(CryptoFileSystemImpl cryptoFileSystem) {
